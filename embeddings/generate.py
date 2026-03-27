@@ -21,7 +21,7 @@ from google import genai
 from google.genai import types as gtypes
 from tqdm import tqdm
 
-from partpilot.config import GEMINI_API_KEY, GEMINI_EMBED_MODEL, POSTGRES_DSN
+from config import GEMINI_API_KEY, GEMINI_EMBED_MODEL, POSTGRES_DSN
 
 log = logging.getLogger(__name__)
 

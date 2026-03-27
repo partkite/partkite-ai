@@ -7,8 +7,8 @@ from __future__ import annotations
 import json
 import re
 
-from partpilot.gemini import generate
-from partpilot.models import QueryIntent
+from gemini import generate
+from models import QueryIntent
 
 _SYSTEM = """You are an electronics parts query classifier.
 Classify the user query into exactly ONE of these intents:

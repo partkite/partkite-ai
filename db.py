@@ -1,16 +1,18 @@
 """
-Async database layer.
-- asyncpg pool  → raw SQL / vector queries (fast, no ORM overhead)
-- supabase-py   → kept for compatibility if needed elsewhere
+Async database layer — asyncpg pool configured for Supabase pgbouncer.
 """
 from __future__ import annotations
 
 import asyncpg
 from asyncpg import Pool
 
-from partpilot.config import POSTGRES_DSN
+from config import POSTGRES_DSN
 
 _pool: Pool | None = None
+
+# Timeout for acquiring a connection from the pool.
+# Fails fast with an error rather than hanging a user request indefinitely.
+_ACQUIRE_TIMEOUT = 20.0
 
 
 async def init_pool() -> None:
@@ -21,9 +23,8 @@ async def init_pool() -> None:
         max_size=20,
         max_inactive_connection_lifetime=300,
         command_timeout=30,
-        statement_cache_size=0,  # required for Supabase transaction pooler (pgbouncer)
+        statement_cache_size=0,  # required for Supabase pgbouncer transaction mode
     )
-    # Verify connectivity
     async with _pool.acquire() as conn:
         await conn.fetchval("SELECT 1")
 
@@ -39,3 +40,8 @@ def get_pool() -> Pool:
     if _pool is None:
         raise RuntimeError("DB pool not initialised — call init_pool() first")
     return _pool
+
+
+def acquire():
+    """Acquire a pool connection with a fast-fail timeout."""
+    return get_pool().acquire(timeout=_ACQUIRE_TIMEOUT)

@@ -1,9 +1,9 @@
 """SEMANTIC + CATEGORY handler — embedding-first hybrid search."""
 from __future__ import annotations
 
-from partpilot.gemini import embed_text, generate
-from partpilot.models import ProductResult, QueryIntent, QueryResponse
-from partpilot.search.hybrid import hybrid_search
+from gemini import embed_text, generate
+from models import ProductResult, QueryIntent, QueryResponse
+from search.hybrid import hybrid_search
 
 _SEMANTIC_SYSTEM = """You are an expert electronics engineer assistant.
 The user asked a question and we found relevant products from Indian electronics stores.
@@ -31,6 +31,8 @@ async def handle_semantic(
         product_list = _format_products(results[:5])
         prompt = f"User query: {query}\n\nTop matching products:\n{product_list}"
         answer = await generate(prompt, system=_SEMANTIC_SYSTEM)
+    else:
+        answer = "No matching products found. Try rephrasing your query or removing stock filters."
 
     return QueryResponse(
         intent=intent,

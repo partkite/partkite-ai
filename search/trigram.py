@@ -1,8 +1,20 @@
 """Trigram-based fuzzy search — best for exact part numbers and SKUs."""
 from __future__ import annotations
 
-from partpilot.db import get_pool
-from partpilot.models import ProductResult
+import json
+from db import acquire, get_pool
+from models import ProductResult
+
+
+def _parse_raw_data(val) -> dict:
+    if not val:
+        return {}
+    if isinstance(val, dict):
+        return val
+    try:
+        return json.loads(val)
+    except Exception:
+        return {}
 
 
 async def trigram_search(
@@ -10,8 +22,7 @@ async def trigram_search(
     limit: int = 10,
     only_in_stock: bool = False,
 ) -> list[ProductResult]:
-    pool = get_pool()
-    async with pool.acquire() as conn:
+    async with acquire() as conn:
         rows = await conn.fetch(
             "SELECT * FROM trigram_search($1, $2, $3)",
             query, limit, only_in_stock,
@@ -30,6 +41,6 @@ def _row_to_result(r: dict, score: float) -> ProductResult:
         categories=list(r["categories"]) if r["categories"] else [],
         brand=r["brand"],
         is_in_stock=r["is_in_stock"],
-        raw_data=dict(r["raw_data"]) if r["raw_data"] else {},
+        raw_data=_parse_raw_data(r["raw_data"]),
         score=score,
     )

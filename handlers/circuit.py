@@ -1,9 +1,9 @@
 """CIRCUIT_HELP handler — Gemini answers, then optionally suggests parts."""
 from __future__ import annotations
 
-from partpilot.gemini import embed_text, generate
-from partpilot.models import QueryIntent, QueryResponse
-from partpilot.search.hybrid import hybrid_search
+from gemini import embed_text, generate
+from models import QueryIntent, QueryResponse
+from search.hybrid import hybrid_search
 
 _CIRCUIT_SYSTEM = """You are an expert electronics engineer.
 Answer the user's circuit/component question precisely:

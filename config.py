@@ -18,3 +18,11 @@ EMBED_DIM: int = 768  # gemini-embedding-001 supports 768/1536/3072 via MRL; 768
 # Search defaults
 DEFAULT_MATCH_COUNT: int = 10
 TRGM_SIMILARITY_THRESHOLD: float = 0.15  # pg_trgm threshold (lower = more results)
+
+# API authentication — comma-separated list of valid keys
+# Set API_KEYS=key1,key2,key3 in env. If unset, auth is disabled (dev mode).
+_raw_keys = os.getenv("API_KEYS", "")
+API_KEYS: set[str] = {k.strip() for k in _raw_keys.split(",") if k.strip()}
+
+# Logging level — set LOG_LEVEL=DEBUG in env for verbose output
+LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()

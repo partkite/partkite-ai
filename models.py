@@ -25,7 +25,7 @@ class QueryRequest(BaseModel):
 
 class BOMRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=8000)
-    only_in_stock: bool = False
+    only_in_stock: bool = True       # BOM searches are purchase-intent — default to in-stock only
     limit_per_item: int = Field(default=5, ge=1, le=20)
 
 
@@ -45,9 +45,13 @@ class ProductResult(BaseModel):
 
 class BOMItem(BaseModel):
     part: str
+    name: str                        # normalized name from LLM
     qty: int | None = None
-    spec: str | None = None          # e.g. "0402", "3.3V", "5mm"
+    confidence: float = 1.0
+    search_terms: list[str] = []
+    important_tokens: list[str] = []
     results: list[ProductResult] = []
+    skipped: bool = False            # True when confidence < 0.65
 
 
 class QueryResponse(BaseModel):

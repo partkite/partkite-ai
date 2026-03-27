@@ -1,9 +1,9 @@
 """Vector (semantic) search via pgvector cosine similarity."""
 from __future__ import annotations
 
-from partpilot.db import get_pool
-from partpilot.models import ProductResult
-from partpilot.search.trigram import _row_to_result
+from db import acquire, get_pool
+from models import ProductResult
+from search.trigram import _row_to_result
 
 
 async def vector_search(
@@ -11,10 +11,8 @@ async def vector_search(
     limit: int = 10,
     only_in_stock: bool = False,
 ) -> list[ProductResult]:
-    pool = get_pool()
     vec_str = "[" + ",".join(str(v) for v in embedding) + "]"
-
-    async with pool.acquire() as conn:
+    async with acquire() as conn:
         rows = await conn.fetch(
             """
             SELECT
