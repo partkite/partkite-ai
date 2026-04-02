@@ -19,8 +19,10 @@ from handlers.circuit import handle_circuit
 from handlers.compare import handle_compare
 from handlers.lookup import handle_lookup
 from handlers.semantic import handle_semantic
-from models import BOMRequest, QueryIntent, QueryRequest, QueryResponse
+from models import BOMRequest, BOMHealth, HealthRequest, ProductResult, ProductVariant, QueryIntent, QueryRequest, QueryResponse
 from router import classify
+from search.trigram import _parse_raw_data, _row_to_result
+from handlers.bom import _compute_flags_only
 
 log = logging.getLogger(__name__)
 
@@ -157,3 +159,69 @@ async def bom(req: BOMRequest) -> QueryResponse:
             raise
         except Exception as e:
             _handle_exc(e, "bom")
+
+
+@app.post("/api/bom/health", response_model=BOMHealth)
+async def bom_health(req: HealthRequest) -> BOMHealth:
+    """
+    Recompute Gemini-based flags (counterfeit risk, NRND) for a list of part names.
+    The 4 deterministic scores are computed client-side; this returns only the
+    Gemini-derived fields so the frontend can merge them.
+    """
+    try:
+        return await asyncio.wait_for(_compute_flags_only(req.names), timeout=20.0)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Request timed out.")
+    except Exception as e:
+        _handle_exc(e, "bom/health")
+
+
+@app.get("/api/product/{product_id}", response_model=ProductResult)
+async def get_product(product_id: str) -> ProductResult:
+    """Direct product lookup by UUID — no AI, no search, pure DB fetch."""
+    try:
+        async with get_pool().acquire(timeout=10) as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT id, product_name, sku, price, source, product_url,
+                       categories, brand, is_in_stock, description, raw_data
+                FROM scraped_data
+                WHERE id = $1::uuid
+                """,
+                product_id,
+            )
+            if row is None:
+                raise HTTPException(status_code=404, detail="Product not found.")
+
+            variant_rows = await conn.fetch(
+                """
+                SELECT id, title, sku, price, is_available, attributes
+                FROM product_variants
+                WHERE scraped_data_id = $1::uuid
+                ORDER BY price ASC NULLS LAST
+                """,
+                product_id,
+            )
+    except HTTPException:
+        raise
+    except asyncpg.TooManyConnectionsError:
+        raise HTTPException(status_code=503, detail="Database busy — please retry shortly.")
+    except Exception as e:
+        log.error("product lookup error: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error.")
+
+    variants = [
+        ProductVariant(
+            id=str(v["id"]),
+            title=v["title"],
+            sku=v["sku"],
+            price=float(v["price"]) if v["price"] is not None else None,
+            is_available=v["is_available"],
+            attributes=_parse_raw_data(v["attributes"]),
+        )
+        for v in variant_rows
+    ]
+
+    result = _row_to_result(row, score=1.0)
+    result.variants = variants
+    return result

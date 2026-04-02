@@ -20,7 +20,7 @@ import logging
 import re
 
 from gemini import embed_batch, generate
-from models import BOMItem, BOMRequest, ProductResult, QueryIntent, QueryResponse
+from models import BOMHealth, BOMItem, BOMItemFlag, BOMRequest, ProductResult, QueryIntent, QueryResponse
 from search.trigram import trigram_search
 from search.vector import vector_search
 
@@ -191,6 +191,141 @@ async def _parse_bom_with_retry(text: str, max_rounds: int = 3) -> list[dict]:
     return _dedup_items(all_items)
 
 
+# ── BOM Health ────────────────────────────────────────────────────────────────
+
+_HEALTH_SYSTEM = """You are an expert electronics engineer with deep knowledge of component supply chains.
+
+Given a list of component names from a Bill of Materials, for each component return:
+- nrnd: true if the part is Not Recommended for New Designs (obsolete, end-of-life, or has a clear modern replacement)
+- counterfeit_risk: "high" if widely counterfeited (e.g. LM7805, IRF540N, 78xx regulators, popular MOSFETs), "medium" if occasionally faked, "low" if rarely counterfeited
+
+Respond ONLY with valid JSON array, no markdown:
+[{"name": "<exact name>", "nrnd": false, "counterfeit_risk": "low"}, ...]"""
+
+
+async def _compute_flags_only(item_names: list[str]) -> BOMHealth:
+    """
+    Run only the Gemini-based assessment (counterfeit + NRND).
+    Returns a BOMHealth with score=0 and deterministic fields=0 —
+    the frontend fills those in from its own data.
+    """
+    flags: list[BOMItemFlag] = []
+    counterfeit_score = 100
+
+    if item_names:
+        try:
+            raw = await generate(
+                "\n".join(item_names),
+                system=_HEALTH_SYSTEM,
+                max_tokens=1024,
+            )
+            raw = re.sub(r"```(?:json)?|```", "", raw).strip()
+            data = json.loads(raw)
+            high_cf = 0
+            med_cf = 0
+            for entry in data:
+                name = entry.get("name", "")
+                nrnd = bool(entry.get("nrnd", False))
+                cf = entry.get("counterfeit_risk", "low")
+                flags.append(BOMItemFlag(name=name, nrnd=nrnd, counterfeit_risk=cf))
+                if cf == "high":
+                    high_cf += 1
+                elif cf == "medium":
+                    med_cf += 1
+            n = len(item_names)
+            deduction = (high_cf / n) * 40 + (med_cf / n) * 20
+            counterfeit_score = max(0, round(100 - deduction))
+        except Exception as e:
+            log.warning("[BOM health] Gemini flags failed: %s", e)
+
+    return BOMHealth(
+        score=0,           # filled by frontend
+        sourcability=0,    # filled by frontend
+        price_spread=0,    # filled by frontend
+        completeness=0,    # filled by frontend
+        recognition=0,     # filled by frontend
+        counterfeit=counterfeit_score,
+        flags=flags,
+    )
+
+
+async def _compute_health(bom_items: list[BOMItem], parsed: list[dict]) -> BOMHealth:
+    """
+    Compute BOM health score from search results + Gemini knowledge.
+    Deterministic scores from data; counterfeit/NRND from Gemini.
+    """
+    total = len(bom_items)
+    if total == 0:
+        return BOMHealth(score=0, sourcability=0, price_spread=0,
+                         completeness=0, recognition=0, counterfeit=100)
+
+    # ── Recognition: % of items not skipped ──────────────────────────────────
+    found = sum(1 for i in bom_items if not i.skipped)
+    recognition = round(found / total * 100)
+
+    # ── Completeness: avg confidence of all parsed items ─────────────────────
+    confidences = [float(p.get("confidence", 1.0)) for p in parsed]
+    completeness = round(sum(confidences) / len(confidences) * 100) if confidences else 100
+
+    # ── Sourcability: % of non-skipped items found on 3+ distributors ────────
+    active = [i for i in bom_items if not i.skipped]
+    if active:
+        multi_dist = sum(
+            1 for i in active
+            if len({r.source for r in i.results}) >= 3
+        )
+        single_dist = sum(
+            1 for i in active
+            if 1 <= len({r.source for r in i.results}) < 3
+        )
+        not_found = sum(1 for i in active if len(i.results) == 0)
+        # Weight: 3+ = full, 1-2 = half, 0 = zero
+        sourcability = round(
+            (multi_dist * 1.0 + single_dist * 0.5) / len(active) * 100
+        )
+    else:
+        sourcability = 0
+
+    # ── Price Spread: consistency of prices across distributors ──────────────
+    spreads: list[float] = []
+    for item in active:
+        prices = [r.price for r in item.results if r.price and r.price > 0]
+        if len(prices) >= 2:
+            mn, mx = min(prices), max(prices)
+            if mx > 0:
+                spreads.append((mx - mn) / mx)  # 0 = identical, 1 = huge spread
+    if spreads:
+        avg_spread = sum(spreads) / len(spreads)
+        price_spread = round(max(0, 100 - avg_spread * 100))
+    else:
+        price_spread = 85  # no multi-source data — neutral
+
+    # ── Counterfeit + NRND: ask Gemini ───────────────────────────────────────
+    item_names = [i.name for i in bom_items if not i.skipped]
+    gemini_health = await _compute_flags_only(item_names)
+    flags = gemini_health.flags
+    counterfeit_score = gemini_health.counterfeit
+
+    # ── Overall score: weighted average ──────────────────────────────────────
+    overall = round(
+        sourcability   * 0.30 +
+        price_spread   * 0.15 +
+        completeness   * 0.15 +
+        recognition    * 0.25 +
+        counterfeit_score * 0.15
+    )
+
+    return BOMHealth(
+        score=overall,
+        sourcability=sourcability,
+        price_spread=price_spread,
+        completeness=completeness,
+        recognition=recognition,
+        counterfeit=counterfeit_score,
+        flags=flags,
+    )
+
+
 # ── Main handler ──────────────────────────────────────────────────────────────
 
 async def handle_bom(req: BOMRequest) -> QueryResponse:
@@ -254,11 +389,15 @@ async def handle_bom(req: BOMRequest) -> QueryResponse:
     ]
     bom_items = await asyncio.gather(*tasks)
 
-    log.info("[BOM] done — %d items", len(bom_items))
+    # Compute health score concurrently with nothing else pending
+    health = await _compute_health(list(bom_items), parsed)
+
+    log.info("[BOM] done — %d items, health=%d", len(bom_items), health.score)
     return QueryResponse(
         intent=QueryIntent.BOM,
         query=req.text,
         bom_items=list(bom_items),
+        bom_health=health,
     )
 
 
@@ -279,8 +418,6 @@ async def _search_bom_item(
     base = BOMItem(
         part=name, name=name, qty=quantity,
         confidence=confidence,
-        search_terms=search_terms,
-        important_tokens=important_tokens,
     )
 
     if confidence < CONFIDENCE_THRESHOLD:

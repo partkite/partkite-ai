@@ -17,7 +17,7 @@ async def vector_search(
             """
             SELECT
                 id, product_name, sku, price, source, product_url,
-                categories, brand, is_in_stock, raw_data,
+                categories, brand, is_in_stock, description, raw_data,
                 1 - (embedding <=> $1::vector) AS vec_score
             FROM scraped_data
             WHERE embedding IS NOT NULL

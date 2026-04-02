@@ -29,6 +29,35 @@ class BOMRequest(BaseModel):
     limit_per_item: int = Field(default=5, ge=1, le=20)
 
 
+class HealthRequest(BaseModel):
+    names: list[str] = Field(..., min_length=1)
+
+
+class BOMItemFlag(BaseModel):
+    name: str
+    nrnd: bool = False
+    counterfeit_risk: str = "low"   # "low" | "medium" | "high"
+
+
+class BOMHealth(BaseModel):
+    score: int                       # 0–100 overall
+    sourcability: int                # % of items found on 3+ distributors
+    price_spread: int                # price consistency across distributors
+    completeness: int                # avg confidence of parsed items
+    recognition: int                 # % of items not skipped
+    counterfeit: int                 # 100 = no risk, lower = more risk
+    flags: list[BOMItemFlag] = []    # per-item nrnd / counterfeit flags
+
+
+class ProductVariant(BaseModel):
+    id: str
+    title: str
+    sku: str | None
+    price: float | None
+    is_available: bool
+    attributes: dict[str, Any]
+
+
 class ProductResult(BaseModel):
     id: str
     product_name: str
@@ -39,8 +68,10 @@ class ProductResult(BaseModel):
     categories: list[str] | None
     brand: str | None
     is_in_stock: bool
+    description: str | None
     raw_data: dict[str, Any]
     score: float
+    variants: list[ProductVariant] = []
 
 
 class BOMItem(BaseModel):
@@ -48,8 +79,6 @@ class BOMItem(BaseModel):
     name: str                        # normalized name from LLM
     qty: int | None = None
     confidence: float = 1.0
-    search_terms: list[str] = []
-    important_tokens: list[str] = []
     results: list[ProductResult] = []
     skipped: bool = False            # True when confidence < 0.65
 
@@ -60,6 +89,7 @@ class QueryResponse(BaseModel):
     results: list[ProductResult] = []
     answer: str | None = None        # LLM-generated text for COMPARE / CIRCUIT_HELP / SEMANTIC
     bom_items: list[BOMItem] = []    # populated for BOM intent
+    bom_health: BOMHealth | None = None  # populated for BOM intent
 
 
 class EmbedRequest(BaseModel):
