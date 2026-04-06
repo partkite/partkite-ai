@@ -9,7 +9,8 @@ import os
 from contextlib import asynccontextmanager
 
 import asyncpg
-from fastapi import FastAPI, HTTPException
+import io
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 from config import LOG_LEVEL
@@ -225,3 +226,103 @@ async def get_product(product_id: str) -> ProductResult:
     result = _row_to_result(row, score=1.0)
     result.variants = variants
     return result
+
+
+# ── File extraction endpoint ──────────────────────────────────────────────────
+
+_ALLOWED_MIME = {
+    "image/jpeg", "image/png", "image/gif", "image/webp", "image/bmp", "image/tiff",
+    "application/pdf",
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "text/csv",
+}
+
+_MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
+
+
+@app.post("/api/extract-file")
+async def extract_file(file: UploadFile = File(...)) -> dict:
+    """
+    Extract text/BOM content from an uploaded file.
+    Supports: images (JPEG/PNG/etc.), PDF, Excel (.xlsx/.xls), CSV.
+    Returns {"text": "<extracted content>"}.
+    """
+    content_type = (file.content_type or "").split(";")[0].strip().lower()
+
+    data = await file.read()
+    if len(data) > _MAX_FILE_SIZE:
+        raise HTTPException(status_code=413, detail="File too large (max 10 MB).")
+
+    try:
+        # ── Images → Vision API OCR ───────────────────────────────────────────
+        if content_type.startswith("image/"):
+            from vision import detect_text
+            text = await detect_text(data, mime_type=content_type)
+            if not text:
+                raise HTTPException(status_code=422, detail="No text found in image.")
+            return {"text": text}
+
+        # ── PDF → Vision API (first page rendered as image via pdf2image) ─────
+        if content_type == "application/pdf":
+            try:
+                import pdf2image  # type: ignore
+                images = pdf2image.convert_from_bytes(data, dpi=200, fmt="jpeg")
+            except Exception as e:
+                raise HTTPException(status_code=422, detail=f"Could not read PDF: {e}")
+
+            from vision import detect_text
+            pages_text: list[str] = []
+            for img in images:
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG")
+                page_text = await detect_text(buf.getvalue(), mime_type="image/jpeg")
+                if page_text:
+                    pages_text.append(page_text)
+
+            text = "\n".join(pages_text).strip()
+            if not text:
+                raise HTTPException(status_code=422, detail="No text found in PDF.")
+            return {"text": text}
+
+        # ── Excel (.xlsx / .xls) → openpyxl / xlrd ───────────────────────────
+        if content_type in (
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "application/vnd.ms-excel",
+        ) or (file.filename or "").lower().endswith((".xlsx", ".xls")):
+            try:
+                import openpyxl  # type: ignore
+                wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+                rows: list[str] = []
+                for ws in wb.worksheets:
+                    for row in ws.iter_rows(values_only=True):
+                        cells = [str(c).strip() for c in row if c is not None and str(c).strip()]
+                        if cells:
+                            rows.append(", ".join(cells))
+                text = "\n".join(rows).strip()
+            except Exception as e:
+                raise HTTPException(status_code=422, detail=f"Could not read Excel file: {e}")
+            if not text:
+                raise HTTPException(status_code=422, detail="Excel file appears empty.")
+            return {"text": text}
+
+        # ── CSV ───────────────────────────────────────────────────────────────
+        if content_type == "text/csv" or (file.filename or "").lower().endswith(".csv"):
+            try:
+                text = data.decode("utf-8", errors="replace").strip()
+            except Exception as e:
+                raise HTTPException(status_code=422, detail=f"Could not read CSV: {e}")
+            if not text:
+                raise HTTPException(status_code=422, detail="CSV file appears empty.")
+            return {"text": text}
+
+        raise HTTPException(
+            status_code=415,
+            detail=f"Unsupported file type: {content_type}. Use image, PDF, Excel, or CSV.",
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("extract-file error: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail="File extraction failed.")
