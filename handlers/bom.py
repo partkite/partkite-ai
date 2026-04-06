@@ -155,7 +155,8 @@ async def _parse_bom_with_retry(text: str, max_rounds: int = 3) -> list[dict]:
         raw = await generate(remaining, system=_BOM_SYSTEM, max_tokens=8192)
         log.debug("[BOM] round %d raw:\n%s", round_num + 1, raw)
 
-        raw   = re.sub(r"```(?:json)?|```", "", raw).strip()
+        raw = re.sub(r"```(?:json)?|```", "", raw).strip()
+        raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
         items, truncated = _extract_complete_items(raw)
 
         # null qty → 1
@@ -219,7 +220,13 @@ async def _compute_flags_only(item_names: list[str]) -> BOMHealth:
                 system=_HEALTH_SYSTEM,
                 max_tokens=1024,
             )
+            # Strip markdown fences and any thinking/preamble — extract first JSON array
             raw = re.sub(r"```(?:json)?|```", "", raw).strip()
+            raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+            start, end = raw.find("["), raw.rfind("]")
+            if start == -1 or end == -1:
+                raise ValueError(f"No JSON array found in response: {raw[:200]}")
+            raw = raw[start:end + 1]
             data = json.loads(raw)
             high_cf = 0
             med_cf = 0
@@ -236,7 +243,7 @@ async def _compute_flags_only(item_names: list[str]) -> BOMHealth:
             deduction = (high_cf / n) * 40 + (med_cf / n) * 20
             counterfeit_score = max(0, round(100 - deduction))
         except Exception as e:
-            log.warning("[BOM health] Gemini flags failed: %s", e)
+            log.warning("[BOM health] Gemini flags failed: %s — raw: %.300s", e, raw if 'raw' in dir() else "N/A")
 
     return BOMHealth(
         score=0,           # filled by frontend

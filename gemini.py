@@ -151,17 +151,16 @@ async def embed_batch(texts: list[str]) -> list[list[float]]:
     return await _call_with_rotation(_fn)
 
 
-async def generate(prompt: str, system: str | None = None, max_tokens: int = 2048) -> str:
+async def generate(prompt: str, system: str | None = None, max_tokens: int | None = None) -> str:
     """Single-turn generation with optional system instruction."""
     async def _fn(client):
+        config_kwargs: dict = {"temperature": 0.2, "system_instruction": system}
+        if max_tokens is not None:
+            config_kwargs["max_output_tokens"] = max_tokens
         resp = await client.aio.models.generate_content(
             model=GEMINI_CHAT_MODEL,
             contents=prompt,
-            config=gtypes.GenerateContentConfig(
-                temperature=0.2,
-                max_output_tokens=max_tokens,
-                system_instruction=system,
-            ),
+            config=gtypes.GenerateContentConfig(**config_kwargs),
         )
         return resp.text
     return await _call_with_rotation(_fn)

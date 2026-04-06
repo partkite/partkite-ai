@@ -42,6 +42,7 @@ def _row_to_result(r: dict, score: float) -> ProductResult:
         brand=r["brand"],
         is_in_stock=r["is_in_stock"],
         description=r.get("description"),
+        ai_description=r.get("ai_description"),
         raw_data=_parse_raw_data(r["raw_data"]),
         score=score,
     )

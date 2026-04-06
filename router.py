@@ -29,8 +29,12 @@ Respond ONLY with valid JSON, no markdown:
 async def classify(query: str) -> tuple[QueryIntent, list[str]]:
     """Returns (intent, extracted_parts)."""
     raw = await generate(query, system=_SYSTEM)
-    # Strip markdown fences if model adds them
     raw = re.sub(r"```(?:json)?|```", "", raw).strip()
+    raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+    # Extract first JSON object in case of preamble
+    start, end = raw.find("{"), raw.rfind("}")
+    if start != -1 and end != -1:
+        raw = raw[start:end + 1]
     try:
         data = json.loads(raw)
         intent = QueryIntent(data.get("intent", "SEMANTIC"))

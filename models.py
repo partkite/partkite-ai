@@ -69,6 +69,7 @@ class ProductResult(BaseModel):
     brand: str | None
     is_in_stock: bool
     description: str | None
+    ai_description: str | None = None
     raw_data: dict[str, Any]
     score: float
     variants: list[ProductVariant] = []

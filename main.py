@@ -185,7 +185,7 @@ async def get_product(product_id: str) -> ProductResult:
             row = await conn.fetchrow(
                 """
                 SELECT id, product_name, sku, price, source, product_url,
-                       categories, brand, is_in_stock, description, raw_data
+                       categories, brand, is_in_stock, description, ai_description, raw_data
                 FROM scraped_data
                 WHERE id = $1::uuid
                 """,
@@ -326,3 +326,59 @@ async def extract_file(file: UploadFile = File(...)) -> dict:
     except Exception as e:
         log.error("extract-file error: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail="File extraction failed.")
+
+
+# ── AI description endpoint ───────────────────────────────────────────────────
+
+_AI_DESC_SYSTEM = """You are a technical writer for an electronics component store.
+Rewrite the given product description to be clear, helpful, and engaging for electronics hobbyists and engineers.
+- Keep it factual and accurate — do not invent specs
+- Use plain English, no marketing fluff
+- Highlight key use cases, electrical specs, and compatibility if mentioned
+- 2–4 sentences max
+- Return only the rewritten description, no preamble"""
+
+
+@app.post("/api/product/{product_id}/ai-description")
+async def generate_ai_description(product_id: str) -> dict:
+    """
+    Generate (or return cached) AI-paraphrased description for a product.
+    On first call: generates via Gemini and saves to scraped_data.ai_description.
+    On subsequent calls: returns the cached value immediately.
+    """
+    try:
+        async with get_pool().acquire(timeout=10) as conn:
+            row = await conn.fetchrow(
+                "SELECT description, ai_description FROM scraped_data WHERE id = $1::uuid",
+                product_id,
+            )
+        if row is None:
+            raise HTTPException(status_code=404, detail="Product not found.")
+
+        # Return cached if already generated
+        if row["ai_description"]:
+            return {"ai_description": row["ai_description"]}
+
+        # Nothing to paraphrase
+        if not row["description"] or not row["description"].strip():
+            return {"ai_description": None}
+
+        # Generate via Gemini
+        from gemini import generate as gemini_generate
+        ai_desc = await gemini_generate(row["description"], system=_AI_DESC_SYSTEM)
+        ai_desc = ai_desc.strip()
+
+        # Persist
+        async with get_pool().acquire(timeout=10) as conn:
+            await conn.execute(
+                "UPDATE scraped_data SET ai_description = $1 WHERE id = $2::uuid",
+                ai_desc, product_id,
+            )
+
+        return {"ai_description": ai_desc}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("ai-description error: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to generate description.")
