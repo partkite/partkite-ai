@@ -31,7 +31,7 @@ CONFIDENCE_THRESHOLD  = 0.65
 VEC_WEIGHT            = 0.6
 TRGM_WEIGHT           = 0.4
 EXACT_MATCH_THRESHOLD = 0.85
-TOKEN_PENALTY         = 0.4
+TOKEN_PENALTY         = 0.15  # was 0.4 — harder penalty so wrong-value products drop further
 _PART_NUM_RE = re.compile(r'^[A-Za-z0-9\-]+$')
 
 _BOM_SYSTEM = """You are an expert electronics BOM (Bill of Materials) parser.
@@ -69,11 +69,62 @@ def _is_part_number(name: str) -> bool:
     return len(tokens) <= 2 and all(_PART_NUM_RE.match(t) for t in tokens)
 
 
+ATTR_EXACT_BOOST = 1.3   # multiplier per token that exactly matches an attribute value
+
+def _apply_source_diversity(
+    scored: list[tuple[float, ProductResult]],
+    limit: int,
+) -> list[tuple[float, ProductResult]]:
+    """
+    Ensures no single source occupies more than 2 of the top `limit` results.
+    Results are pulled in score order; once a source hits 2 appearances,
+    further results from that source are deferred to the end.
+    """
+    top: list[tuple[float, ProductResult]] = []
+    deferred: list[tuple[float, ProductResult]] = []
+    source_count: dict[str, int] = {}
+
+    for item in scored:
+        src = item[1].source
+        if source_count.get(src, 0) < 2:
+            top.append(item)
+            source_count[src] = source_count.get(src, 0) + 1
+            if len(top) == limit:
+                break
+        else:
+            deferred.append(item)
+
+    # If we didn't fill limit (all sources exhausted), pad with deferred
+    if len(top) < limit:
+        top += deferred[:limit - len(top)]
+
+    return top
+
+
+def _attr_exact_boost(tokens: list[str], product: ProductResult) -> float:
+    """
+    Boost for products (e.g. robu.in) where raw_data.attributes contains
+    exact matches for important tokens. Each matching token multiplies by
+    ATTR_EXACT_BOOST. No attributes → neutral (1.0).
+    """
+    attrs = (product.raw_data or {}).get("attributes", {})
+    if not attrs or not tokens:
+        return 1.0
+    attr_values = [str(v).lower() for v in attrs.values()]
+    boost = 1.0
+    for tok in tokens:
+        tok_l = tok.lower()
+        if any(tok_l == v or tok_l in v.split() for v in attr_values):
+            boost *= ATTR_EXACT_BOOST
+    return boost
+
+
 def _token_match_factor(tokens: list[str], product: ProductResult) -> float:
     """
     Returns a multiplier in [TOKEN_PENALTY, 1.0].
-    For each important token that does NOT appear in product_name or sku,
-    apply TOKEN_PENALTY. Multiple misses compound.
+    For each important token that does NOT appear in product_name, sku,
+    or raw_data.attributes values (for robu.in and similar), apply TOKEN_PENALTY.
+    Multiple misses compound.
     """
     if not tokens:
         return 1.0
@@ -81,6 +132,11 @@ def _token_match_factor(tokens: list[str], product: ProductResult) -> float:
         (product.product_name or "").lower() + " " +
         (product.sku or "").lower()
     )
+    # Include attribute values (e.g. robu.in stores "Capacitance:": "100nF")
+    attrs = (product.raw_data or {}).get("attributes", {})
+    if attrs:
+        haystack += " " + " ".join(str(v) for v in attrs.values()).lower()
+
     factor = 1.0
     for tok in tokens:
         if tok.lower() not in haystack:
@@ -218,7 +274,7 @@ async def _compute_flags_only(item_names: list[str]) -> BOMHealth:
             raw = await generate(
                 "\n".join(item_names),
                 system=_HEALTH_SYSTEM,
-                max_tokens=1024,
+                max_tokens=4096,
             )
             # Strip markdown fences and any thinking/preamble — extract first JSON array
             raw = re.sub(r"```(?:json)?|```", "", raw).strip()
@@ -483,7 +539,10 @@ async def _search_bom_item(
         row = vec_rows.get(pid) or trgm_rows[pid]
         base_score = VEC_WEIGHT * vs + TRGM_WEIGHT * ks
         penalty    = _token_match_factor(important_tokens, row)
-        final      = base_score * penalty
+        # Exact attribute match boost: for products with raw_data.attributes
+        # (e.g. robu.in), reward exact token hits in attribute values
+        attr_boost = _attr_exact_boost(important_tokens, row)
+        final      = base_score * penalty * attr_boost
         scored.append((final, row.model_copy(update={"score": round(final, 4)})))
 
     scored.sort(key=lambda x: x[0], reverse=True)
@@ -493,7 +552,7 @@ async def _search_bom_item(
         scored = [(s, r) for s, r in scored if r.id != pinned.id]
         scored.insert(0, (pinned.score, pinned))
 
-    top = scored[:limit]
+    top = _apply_source_diversity(scored, limit)
     log.info(
         "[BOM] %r — %d candidates, top %d (best=%.3f%s)",
         name, len(all_ids), len(top),
