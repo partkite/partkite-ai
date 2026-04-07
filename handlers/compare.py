@@ -10,12 +10,12 @@ from search.hybrid import hybrid_search
 from search.trigram import trigram_search
 
 _COMPARE_SYSTEM = """You are an expert electronics engineer.
-Compare the given parts clearly and concisely:
-- Key specs differences
-- Use cases where each excels
-- Availability / price in India (from the product data provided)
-- Recommendation based on common use cases
-Format as plain text, no markdown tables."""
+Compare the given parts clearly and concisely.
+Format your detailed comparison EXACTLY as a single column-based Markdown table (with columns: Feature, Part 1, Part 2).
+Below the table, provide a short 1-2 sentence final conclusion block highlighting the Use Cases and a Recommendation.
+
+CRITICAL INSTRUCTION:
+DO NOT recommend a product that is 'In stock: False' in your final conclusion unless there are zero in-stock alternatives."""
 
 # Minimum trigram score to trust the result without falling back to vector search
 _TRGM_CONFIDENCE = 0.6

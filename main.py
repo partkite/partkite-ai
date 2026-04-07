@@ -4,6 +4,7 @@ PartPilot — FastAPI entry point.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -20,7 +21,7 @@ from handlers.circuit import handle_circuit
 from handlers.compare import handle_compare
 from handlers.lookup import handle_lookup
 from handlers.semantic import handle_semantic
-from models import BOMRequest, BOMHealth, HealthRequest, ProductResult, ProductVariant, QueryIntent, QueryRequest, QueryResponse
+from models import BOMRequest, BOMHealth, HealthRequest, ProductResult, ProductVariant, QueryIntent, QueryRequest, QueryResponse, PartEnrichRequest, PartEnrichResponse, CategoryOverviewRequest, CategoryOverviewResponse, CategoryGroup
 from router import classify
 from search.trigram import _parse_raw_data, _row_to_result
 from handlers.bom import _compute_flags_only
@@ -382,3 +383,267 @@ async def generate_ai_description(product_id: str) -> dict:
     except Exception as e:
         log.error("ai-description error: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to generate description.")
+
+
+# ── Part enrichment endpoint ──────────────────────────────────────────────────
+
+def _fix_truncated_json(raw: str) -> str:
+    """Fix truncated JSON strings by closing unclosed strings, brackets, and braces in the correct order."""
+    import re as _re
+    raw = _re.sub(r",\s*([}\]])", r"\1", raw)
+    raw = _re.sub(r"(?<![\\])'", '"', raw)
+    
+    escaped = False
+    in_string = False
+    stack = []
+    
+    for c in raw:
+        if c == '\\' and not escaped:
+            escaped = True
+            continue
+        elif c == '"' and not escaped:
+            in_string = not in_string
+            escaped = False
+            continue
+            
+        if not in_string:
+            if c == '{':
+                stack.append('}')
+            elif c == '[':
+                stack.append(']')
+            elif c == '}':
+                if stack and stack[-1] == '}':
+                    stack.pop()
+            elif c == ']':
+                if stack and stack[-1] == ']':
+                    stack.pop()
+        escaped = False
+            
+    if in_string:
+        raw += '"'
+        
+    raw = raw.rstrip().rstrip(",")
+    
+    while stack:
+        raw += stack.pop()
+        
+    return raw
+
+
+def _extract_partial_json(raw: str) -> dict:
+    """
+    Best-effort extraction of top-level string/list fields from truncated JSON.
+    Tries each top-level key individually so a truncated 'specs' doesn't kill 'good_for'.
+    """
+    import re as _re2
+    result = {}
+    # Try to extract each known field independently
+    for field in ("specs", "good_for", "watch_out", "external_needed", "alts", "counterfeit_note"):
+        # Find the field's value start
+        m = _re2.search(rf'"{field}"\s*:\s*', raw)
+        if not m:
+            continue
+        val_start = m.end()
+        val_raw = raw[val_start:].strip()
+        # Try to parse just this value by finding its natural end
+        for end_offset in range(len(val_raw), 0, -1):
+            try:
+                val = json.loads(val_raw[:end_offset])
+                result[field] = val
+                break
+            except (json.JSONDecodeError, ValueError):
+                continue
+    return result
+
+_ENRICH_SYSTEM = """You are an expert electronics engineer. Given a component's name, description, and raw attributes, extract structured information.
+
+Respond ONLY with valid JSON (no markdown, no preamble):
+{
+  "specs": {"Spec name": "value"},
+  "good_for": ["use case 1", "use case 2"],
+  "watch_out": ["caution 1"],
+  "external_needed": "components needed or null",
+  "alts": [{"name": "part", "note": "why", "price_hint": "₹X–Y or null"}],
+  "counterfeit_note": "note or null"
+}
+
+Rules:
+- specs: exactly 4–5 key electrical specs (voltage, current, package, frequency). Short keys, concise values.
+- good_for: 2–3 practical use cases as short phrases
+- watch_out: 1–2 real cautions. Empty list if none.
+- external_needed: only for ICs that need external passives. null for modules.
+- alts: 1–2 real alternative part numbers. Empty list if unknown.
+- counterfeit_note: only if commonly counterfeited. null otherwise.
+- All string values must use double quotes. No trailing commas.
+"""
+
+
+@app.post("/api/part/enrich", response_model=PartEnrichResponse)
+async def enrich_part(req: PartEnrichRequest) -> PartEnrichResponse:
+    """
+    AI-extract structured specs, use cases, cautions, and alternatives for a part.
+    Uses cached ai_description if available, otherwise generates fresh.
+    """
+    import json, re as _re
+    from gemini import generate as gemini_generate
+
+    # Build context from all available data
+    attrs_text = ""
+    if req.raw_data.get("attributes"):
+        attrs_text = "\n".join(f"  {k} {v}" for k, v in req.raw_data["attributes"].items())
+    elif req.raw_data.get("price_tiers"):
+        tiers = req.raw_data["price_tiers"]
+        attrs_text = "Price tiers: " + ", ".join(
+            f"₹{t['price']} (qty {t['min_qty']}+)" for t in tiers
+        )
+
+    cats = [c for c in req.categories if not c.startswith("[C]") and not c.startswith("_") and len(c) > 2]
+    context = f"""Part: {req.product_name}
+Categories: {', '.join(cats) if cats else 'unknown'}
+Description: {req.description or 'not available'}
+Attributes:
+{attrs_text or 'not available'}"""
+
+    try:
+        raw = await asyncio.wait_for(
+            gemini_generate(context, system=_ENRICH_SYSTEM),
+            timeout=20.0,
+        )
+        raw = _re.sub(r"```(?:json)?|```", "", raw).strip()
+        raw = _re.sub(r"<think>.*?</think>", "", raw, flags=_re.DOTALL).strip()
+        start = raw.find("{")
+        if start != -1:
+            raw = raw[start:]
+        raw = _fix_truncated_json(raw)
+        data = json.loads(raw)
+        return PartEnrichResponse(
+            specs=data.get("specs") or {},
+            good_for=data.get("good_for") or [],
+            watch_out=data.get("watch_out") or [],
+            external_needed=data.get("external_needed"),
+            alts=data.get("alts") or [],
+            counterfeit_note=data.get("counterfeit_note"),
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Enrichment timed out.")
+    except (json.JSONDecodeError, ValueError) as e:
+        log.warning("enrich JSON parse failed (%s), attempting field extraction | raw=%r", e, locals().get("raw", ""))
+        # Best-effort: extract whatever fields parsed before truncation
+        data = _extract_partial_json(locals().get("raw", ""))
+        return PartEnrichResponse(
+            specs=data.get("specs") or {},
+            good_for=data.get("good_for") or [],
+            watch_out=data.get("watch_out") or [],
+            external_needed=data.get("external_needed"),
+            alts=data.get("alts") or [],
+            counterfeit_note=data.get("counterfeit_note"),
+        )
+    except Exception as e:
+        log.error("enrich error: %s | raw=%r", e, locals().get("raw", ""), exc_info=True)
+        raise HTTPException(status_code=500, detail="Enrichment failed.")
+
+
+# ── Category overview endpoint ────────────────────────────────────────────────
+
+_CATEGORY_SYSTEM = """You are an expert electronics engineer. Given a list of products in a category, group them into meaningful sub-types.
+
+Respond ONLY with valid JSON (no markdown, no preamble):
+{
+  "title": "clean category name (title case)",
+  "subtitle": "short tagline e.g. '6 types stocked'",
+  "groups": [
+    {
+      "name": "Sub-type name",
+      "description": "One sentence: what it is and when to use it.",
+      "product_names": ["exact product name 1", "exact product name 2", ...]
+    }
+  ]
+}
+
+Rules:
+- Create 3–8 meaningful groups based on actual sub-types (e.g. H-Bridge ICs, Stepper Drivers, BLDC Drivers)
+- Each group must contain only product names from the provided list — no invented names
+- description must be practical and specific, not generic
+- title should be clean (e.g. "Motor Drivers" not "types of motor drivers")
+- subtitle: "{N} types stocked — click any category to see parts and prices"
+"""
+
+
+@app.post("/api/category/overview", response_model=CategoryOverviewResponse)
+async def category_overview(req: CategoryOverviewRequest) -> CategoryOverviewResponse:
+    """
+    AI-group a list of products into meaningful sub-categories with descriptions.
+    """
+    import json, re as _re
+    from gemini import generate as gemini_generate
+
+    products_text = "\n".join(
+        f"- {p.product_name} | cats: {', '.join(c for c in p.categories if not c.startswith('[C]') and not c.startswith('_'))}"
+        + (f" | {p.description[:120]}..." if p.description else "")
+        for p in req.products[:30]
+    )
+    prompt = f"Query: {req.query}\n\nProducts:\n{products_text}"
+
+    try:
+        raw = await asyncio.wait_for(
+            gemini_generate(prompt, system=_CATEGORY_SYSTEM),
+            timeout=45.0,
+        )
+        raw = _re.sub(r"```(?:json)?|```", "", raw).strip()
+        raw = _re.sub(r"<think>.*?</think>", "", raw, flags=_re.DOTALL).strip()
+        # Find outermost JSON object start — don't trim at rfind("}") since output may be truncated
+        start = raw.find("{")
+        if start != -1:
+            raw = raw[start:]
+        raw = _fix_truncated_json(raw)
+        data = json.loads(raw)
+
+        # Build a name→product map for fast lookup
+        name_map = {p.product_name: p for p in req.products}
+
+        groups = []
+        for g in data.get("groups", []):
+            pnames = g.get("product_names", [])
+            # Only keep names that actually exist in our product list
+            valid = [n for n in pnames if n in name_map]
+            if not valid:
+                # fuzzy fallback: match by prefix
+                valid = [p.product_name for p in req.products
+                         if any(n.lower() in p.product_name.lower() or p.product_name.lower() in n.lower()
+                                for n in pnames)][:3]
+            groups.append(CategoryGroup(
+                name=g.get("name", "Other"),
+                description=g.get("description", ""),
+                count=len(valid),
+                examples=valid[:3],
+            ))
+
+        return CategoryOverviewResponse(
+            title=data.get("title", req.query),
+            subtitle=data.get("subtitle", f"{len(groups)} types stocked"),
+            groups=groups,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Category overview timed out.")
+    except (json.JSONDecodeError, ValueError) as e:
+        log.warning("category overview JSON parse failed (%s) | raw=%r", e, locals().get("raw", ""))
+        # Return a minimal fallback grouping by cleaned category tags
+        from collections import defaultdict
+        fallback: dict[str, list] = defaultdict(list)
+        for p in req.products:
+            cats = [c for c in p.categories if not c.startswith("[C]") and not c.startswith("_") and len(c) > 2]
+            key = cats[0] if cats else "Other"
+            fallback[key].append(p.product_name)
+        groups = [
+            CategoryGroup(name=k, description="", count=len(v), examples=v[:3])
+            for k, v in list(fallback.items())[:8]
+        ]
+        catname = req.query.replace(r"^(types of|browse|show me|list|all)\s+", "").strip().title()
+        return CategoryOverviewResponse(
+            title=catname,
+            subtitle=f"{len(groups)} types stocked",
+            groups=groups,
+        )
+    except Exception as e:
+        log.error("category overview error: %s | raw=%r", e, locals().get("raw", ""), exc_info=True)
+        raise HTTPException(status_code=500, detail="Category overview failed.")

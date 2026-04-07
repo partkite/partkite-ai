@@ -97,3 +97,44 @@ class EmbedRequest(BaseModel):
     """Internal — used by the bulk embedding job."""
     batch_size: int = Field(default=50, ge=1, le=100)
     offset: int = Field(default=0, ge=0)
+
+
+# ── Enriched part detail ──────────────────────────────────────────────────────
+
+class PartEnrichRequest(BaseModel):
+    product_id: str
+    product_name: str
+    description: str | None = None
+    raw_data: dict[str, Any] = {}
+    categories: list[str] = []
+
+class PartEnrichResponse(BaseModel):
+    specs: dict[str, str]           # e.g. {"Vin range": "4.5–40V", "Iout max": "3A"}
+    good_for: list[str]             # use-case bullets
+    watch_out: list[str]            # caution bullets
+    external_needed: str | None     # e.g. "69–100µH inductor, 100µF/50V cap"
+    alts: list[dict[str, str | None]] # [{name, note, price_hint}]
+    counterfeit_note: str | None
+
+
+# ── Category overview ─────────────────────────────────────────────────────────
+
+class CategoryProduct(BaseModel):
+    product_name: str
+    categories: list[str] = []
+    description: str | None = None
+
+class CategoryOverviewRequest(BaseModel):
+    query: str
+    products: list[CategoryProduct]
+
+class CategoryGroup(BaseModel):
+    name: str                        # e.g. "H-Bridge ICs"
+    description: str                 # 1-sentence explanation
+    count: int
+    examples: list[str]              # top 3 product names
+
+class CategoryOverviewResponse(BaseModel):
+    title: str                       # cleaned category name
+    subtitle: str                    # e.g. "6 types stocked"
+    groups: list[CategoryGroup]
