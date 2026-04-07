@@ -332,12 +332,12 @@ async def extract_file(file: UploadFile = File(...)) -> dict:
 # ── AI description endpoint ───────────────────────────────────────────────────
 
 _AI_DESC_SYSTEM = """You are a technical writer for an electronics component store.
-Rewrite the given product description to be clear, helpful, and engaging for electronics hobbyists and engineers.
-- Keep it factual and accurate — do not invent specs
+Paraphrase the given product description to be clear, helpful, and engaging for electronics hobbyists and engineers.
+- Preserve ALL information from the original — do not omit any specs, features, or details
+- Rephrase every part of the original content; do not summarize or condense
 - Use plain English, no marketing fluff
-- Highlight key use cases, electrical specs, and compatibility if mentioned
-- 2–4 sentences max
-- Return only the rewritten description, no preamble"""
+- Keep the same level of detail and length as the original
+- Return only the paraphrased description, no preamble"""
 
 
 @app.post("/api/product/{product_id}/ai-description")
