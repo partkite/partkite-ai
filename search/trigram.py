@@ -12,7 +12,10 @@ def _parse_raw_data(val) -> dict:
     if isinstance(val, dict):
         return val
     try:
-        return json.loads(val)
+        parsed = json.loads(val)
+        if isinstance(parsed, dict):
+            return parsed
+        return {}
     except Exception:
         return {}
 

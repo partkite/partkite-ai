@@ -52,10 +52,10 @@ class BOMHealth(BaseModel):
 class ProductVariant(BaseModel):
     id: str
     title: str
-    sku: str | None
-    price: float | None
-    is_available: bool
-    attributes: dict[str, Any]
+    sku: str | None = None
+    price: float | None = None
+    is_available: bool = False
+    attributes: dict[str, Any] = {}
 
 
 class ProductResult(BaseModel):

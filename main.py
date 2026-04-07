@@ -215,11 +215,11 @@ async def get_product(product_id: str) -> ProductResult:
     variants = [
         ProductVariant(
             id=str(v["id"]),
-            title=v["title"],
-            sku=v["sku"],
+            title=v["title"] or "",
+            sku=v["sku"] or None,
             price=float(v["price"]) if v["price"] is not None else None,
-            is_available=v["is_available"],
-            attributes=_parse_raw_data(v["attributes"]),
+            is_available=bool(v["is_available"]) if v["is_available"] is not None else False,
+            attributes=_parse_raw_data(v["attributes"]) or {},
         )
         for v in variant_rows
     ]
